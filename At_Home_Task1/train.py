@@ -81,7 +81,7 @@ for epoch in range(1): # Chạy 1 epoch để đảm bảo hoàn thành nhanh d�
         labels = batch["labels"].to(DEVICE)
         
         optimizer.zero_grad()
-outputs = model(inputs)
+        outputs = model(inputs)
         logits = outputs.logits
         
         loss = loss_fn(logits, labels)
