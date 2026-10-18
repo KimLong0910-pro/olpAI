@@ -1,37 +1,48 @@
-import os
 import json
-import torch
-import librosa
-import pandas as pd
-import numpy as np
+import os
+import warnings
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader
+
+import librosa
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader, Dataset
 from transformers import ASTFeatureExtractor, ASTForAudioClassification, AdamW
 
-# 1. Thiết lập cấu hình cơ bản
-LOCAL_DATA_DIR = Path("./dataset") # Thư mục chứa dữ liệu đã giải nén
+warnings.filterwarnings("ignore")
+
+# 0. Setup
+LOCAL_DATA_DIR = Path("./dataset")
+if not LOCAL_DATA_DIR.exists():
+    raise FileNotFoundError(
+        "Dataset not found. Please run download_data.py first."
+    )
+
 OLD_CSV = LOCAL_DATA_DIR / "train.csv"
 NEW_CSV = LOCAL_DATA_DIR / "fine_tune.csv"
 CHECKPOINT = LOCAL_DATA_DIR / "model"
-
 SR = 16_000
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Đang sử dụng thiết bị: {DEVICE}")
+BATCH_SIZE = 8
+DEVICE = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
 
-# 2. Xử lý nhãn (29 lớp tổng cộng)
 config = json.loads((CHECKPOINT / "config.json").read_text())
 old_id2label = {int(k): v for k, v in config["id2label"].items()}
+NUM_OLD = len(old_id2label)
+print(f"device = {DEVICE} | checkpoint knows {NUM_OLD} classes")
 
 old_df = pd.read_csv(OLD_CSV)
 new_df = pd.read_csv(NEW_CSV)
+new_df["target"] = new_df["target"]
 new_id2label = dict(new_df[["target", "category"]].drop_duplicates().values)
 new_id2label = {int(k): v for k, v in sorted(new_id2label.items())}
 
 id2label = {**old_id2label, **new_id2label}
+label2id = {v: k for k, v in id2label.items()}
 NUM_TOTAL = len(id2label)
-print(f"Tổng số lớp sau khi mở rộng: {NUM_TOTAL}")
+print(f"total classes after expansion: {NUM_TOTAL}")
 
-# 3. Định nghĩa Dataset đọc âm thanh
+# Feature Extractor and Dataset Class
 feature_extractor = ASTFeatureExtractor.from_pretrained(str(CHECKPOINT))
 
 class AudioDataset(Dataset):
@@ -54,28 +65,30 @@ class AudioDataset(Dataset):
         label = row["target"]
         return {"input_values": input_values, "labels": torch.tensor(label, dtype=torch.long)}
 
-# 4. Tải mô hình AST và mở rộng đầu ra lên 29 lớp
+# Load Pre-trained AST Model
 model = ASTForAudioClassification.from_pretrained(
     str(CHECKPOINT),
     num_labels=NUM_TOTAL,
     ignore_mismatched_sizes=True
 ).to(DEVICE)
 
-# 5. Huấn luyện mô hình (Fine-tune)
+# Prepare Combined Dataset and DataLoader
 train_combined_df = pd.concat([
     old_df[old_df['split'] == 'train'], 
     new_df[new_df['split'] == 'train']
 ], ignore_index=True)
 
 train_dataset = AudioDataset(train_combined_df, LOCAL_DATA_DIR, feature_extractor)
-train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True) # Giảm batch_size xuống 4 nếu RAM/GPU yếu
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
+# Optimizer & Loss Function
 optimizer = AdamW(model.parameters(), lr=1e-5)
 loss_fn = torch.nn.CrossEntropyLoss()
 
+# Training Loop
 model.train()
-print("Bắt đầu quá trình huấn luyện trên VS Code...")
-for epoch in range(1): # Chạy 1 epoch để đảm bảo hoàn thành nhanh dưới 10 phút
+print("Starting training loop...")
+for epoch in range(1):
     for batch_idx, batch in enumerate(train_loader):
         inputs = batch["input_values"].to(DEVICE)
         labels = batch["labels"].to(DEVICE)
@@ -91,4 +104,4 @@ for epoch in range(1): # Chạy 1 epoch để đảm bảo hoàn thành nhanh d�
         if batch_idx % 10 == 0:
             print(f"Epoch {epoch} | Batch {batch_idx}/{len(train_loader)} | Loss: {loss.item():.4f}")
 
-print("Huấn luyện hoàn tất! Mô hình đã sẵn sàng.")
+print("Training finished successfully!")
